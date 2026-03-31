@@ -9,10 +9,11 @@ from eperusteet_client import (
     get_peruste,
     get_lops2019_oppiaineet,
     get_lops2019_oppiaine,
-    search_amosaa_ops,
+    search_ylops_ops,
     extract_peruste_summary,
     extract_peruste_structure,
     extract_oppiaine_summary,
+    extract_ylops_ops_summary,
     _fi,
     _ts_to_date,
 )
@@ -126,97 +127,81 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
 
 async def hae_paikalliset_opetussuunnitelmat(
     nimi: str | None = None,
-    peruste_id: int | None = None,
+    koulutustyyppi: str | None = None,
     sivukoko: int = 20,
 ) -> str:
     """
-    Hae paikallisia opetussuunnitelmia (ammatilliset OPS:t koulutuksentarjoajittain).
+    Hae paikallisia opetussuunnitelmia (perusopetus, lukio) kunnittain tai kouluittain.
 
     USE THIS TOOL WHEN:
-    - Käyttäjä kysyy "Onko koulutuksentarjoaja X julkaissut paikallisen OPS:n?"
-    - Käyttäjä haluaa listata tiettyyn ammatilliseen perusteeseen pohjautuvia paikallisia OPS:ja
-    - Käyttäjä etsii organisaation nimeä tai koulutuksen nimeä paikallisista OPS:ista
-    - Käyttäjä kysyy "Mitä paikallisia ammatillisia OPS:ja on julkaistu?"
-
-    HUOM: Tämä työkalu hakee ammatillisia paikallisia OPS:ja (AMOSAA-palvelusta).
-    Perusopetuksen ja lukion paikalliset OPS:t eivät ole saatavilla tässä palvelussa
-    tällä hetkellä.
+    - Käyttäjä kysyy "Onko Tampereen kaupungilla julkaistu paikallinen OPS?"
+    - Käyttäjä haluaa listata tietyn kunnan tai koulun paikallisia OPS:ja
+    - Käyttäjä kysyy "Mitä lukion paikallisia OPS:ja on julkaistu?"
+    - Käyttäjä etsii kunnan tai koulun nimeä paikallisista OPS:ista
 
     THEN CALL:
     → Löytyi OPS? → käytä hae_paikallinen_opetussuunnitelma yksityiskohtien hakemiseen
 
     DO NOT USE WHEN:
     - Käyttäjä etsii kansallista perustetta → käytä hae_perusteet
-    - Käyttäjä etsii lukion tai perusopetuksen paikallista OPS:a
-      (niitä ei ole saatavilla tässä palvelussa)
+    - Käyttäjä etsii ammatillisia paikallisia OPS:ja (ammatilliset eivät ole tässä palvelussa)
 
     Parameters:
-    - nimi: Hakusana (koulutuksen tai organisaation nimi). Esim. "Keski-Pohjanmaa", "autoala"
-    - peruste_id: Suodatusta kansallisen perusteen ID:n mukaan (esim. 8262880)
+    - nimi: Hakusana (kunnan tai koulun nimi). Esim. "Tampere", "Helsinki", "Jyväskylä"
+    - koulutustyyppi: Suodata koulutustyypin mukaan (sovelletaan asiakaspuolella):
+        koulutustyyppi_16 = perusopetus
+        koulutustyyppi_2  = lukiokoulutus
     - sivukoko: Tulosten määrä (1–20, oletus 20)
     """
     sivukoko = min(sivukoko, MAX_ROWS)
-    data = await search_amosaa_ops(nimi=nimi, peruste_id=peruste_id, sivukoko=sivukoko)
+    # Fetch more if client-side koulutustyyppi filtering is needed
+    fetch_size = min(100, sivukoko * 5) if koulutustyyppi else sivukoko
+    data = await search_ylops_ops(nimi=nimi, sivukoko=fetch_size)
     items = data.get("data", [])
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", len(items)))
+    total = data.get("kokonaism\u00e4\u00e4r\u00e4", len(items))
+
+    # Client-side koulutustyyppi filter (server ignores this param)
+    if koulutustyyppi:
+        items = [i for i in items if i.get("koulutustyyppi") == koulutustyyppi]
 
     if not items:
         tips = []
-        if peruste_id:
-            tips.append("tarkista perusteId")
         if nimi:
-            tips.append("kokeile lyhyempää hakusanaa")
+            tips.append("kokeile lyhyempää hakusanaa tai kunnan nimeä")
+        if koulutustyyppi:
+            tips.append("kokeile ilman koulutustyyppisuodatinta")
         tip_str = " tai ".join(tips) if tips else "kokeile eri hakusanoja"
-        return (
-            f"Ei löydetty paikallisia OPS:ja. Vinkki: {tip_str}.\n"
-            "Huom: vain ammatilliset OPS:t ovat saatavilla tässä palvelussa."
-        )
+        return f"Ei löydetty paikallisia OPS:ja. Vinkki: {tip_str}."
 
-    lines = [
-        f"Löytyi {total} paikallista OPS:a (näytetään {min(len(items), MAX_ROWS)}):\n"
-    ]
-    for item in items[:MAX_ROWS]:
-        ops_nimi = _fi(item.get("nimi"))
-        ops_id = item.get("id")
-        tila = item.get("tila", "–")
-        org = item.get("koulutustoimija", {})
-        org_nimi = _fi(org.get("nimi")) if isinstance(org, dict) else "–"
-        peruste = item.get("peruste", {})
-        peruste_nimi = _fi(peruste.get("nimi")) if isinstance(peruste, dict) else "–"
-        luotu = _ts_to_date(item.get("luotu"))
-        muokattu = _ts_to_date(item.get("muokattu"))
-
-        lines.append(f"**{ops_nimi}**")
-        lines.append(f"  ID: {ops_id}")
-        lines.append(f"  Koulutustoimija: {org_nimi}")
-        lines.append(f"  Peruste: {peruste_nimi}")
-        lines.append(f"  Tila: {tila} | Luotu: {luotu} | Muokattu: {muokattu}")
-
-        # Include kuvaus excerpt if available
-        kuvaus = _fi(item.get("kuvaus", {}))
-        if kuvaus:
-            import re
-            clean = re.sub(r"<[^>]+>", " ", kuvaus)
-            clean = " ".join(clean.split())[:300]
-            if clean:
-                lines.append(f"  Kuvaus: {clean}")
+    shown = items[:sivukoko]
+    lines = [f"Löytyi paikallisia OPS:ja (näytetään {len(shown)}):\n"]
+    for item in shown:
+        lines.append(extract_ylops_ops_summary(item))
         lines.append("")
 
-    if total > MAX_ROWS:
+    if len(items) > sivukoko:
         lines.append(
-            f"[Näytetään {MAX_ROWS}/{total} — tarkenna hakua nimellä tai perusteId:llä]"
+            f"[Lisää tuloksia saatavilla — tarkenna hakua kunnan nimellä]"
+        )
+    elif not koulutustyyppi and total > fetch_size:
+        lines.append(
+            f"[Näytetään {fetch_size}/{total} — tarkenna hakua nimellä]"
         )
     return "\n".join(lines)
 
 
 async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
     """
-    Hae yksittäisen paikallisen ammatillisen OPS:n tiedot ID:n perusteella.
+    Hae yksittäisen paikallisen OPS:n tiedot ID:n perusteella (perusopetus, lukio).
 
     USE THIS TOOL WHEN:
     - Käyttäjällä on paikallisen OPS:n ID (saatu hae_paikalliset_opetussuunnitelmat-hausta)
-    - Käyttäjä haluaa tietää OPS:n sisällön, kuvauksen tai rakenteen
-    - Käyttäjä kysyy "Mitä tämä paikallinen OPS sisältää?"
+    - Käyttäjä haluaa tietää OPS:n tiedot: kunta, koulut, koulutustyyppi, julkaisuaika
+    - Käyttäjä kysyy "Mitä tietoja tästä paikallisesta OPS:sta on saatavilla?"
+
+    HUOM: OPS:n sisältötekstit eivät ole saatavilla API:n kautta tällä hetkellä
+    (yksityiskohtainen sisältö vaatisi toimivan detail-endpointin, joka on poissa käytöstä).
+    Voit ohjata käyttäjän ePerusteet-palvelun web-käyttöliittymään tarkempaa sisältöä varten.
 
     THEN CALL:
     → Tarvitaan kansallinen peruste? → kutsu hae_peruste_tiedot peruste_id:llä
@@ -228,67 +213,27 @@ async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
     Parameters:
     - ops_id: Paikallisen OPS:n numerinen ID (saatu hae_paikalliset_opetussuunnitelmat-hausta)
     """
-    # Try AMOSAA list with sivukoko=1 to get fresh data for this OPS
-    # Note: direct detail endpoint (/opetussuunnitelmat/{id}) returns 500 for AMOSAA
-    # We use the list endpoint filtered by trying to match the ID
-    # Instead, search broadly and find the matching ID from cached results
-    # Since detail endpoint is down, we do a broader search and filter
-    data = await search_amosaa_ops(sivukoko=50)
-    items = data.get("data", [])
+    # Detail endpoint returns 500 — scan the list to find the item by ID.
+    # Items appear to be ordered by ID desc; scan pages until found or exhausted.
+    sivukoko = 100
+    data = await search_ylops_ops(sivukoko=sivukoko, sivu=0)
+    total = data.get("kokonaism\u00e4\u00e4r\u00e4", 0)
+    total_pages = max(1, -(-total // sivukoko))  # ceiling division
 
-    for item in items:
+    for item in data.get("data", []):
         if item.get("id") == ops_id:
-            return _format_amosaa_ops_detail(item)
+            return extract_ylops_ops_summary(item)
 
-    # Try to find by iterating pages
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", 0))
-    if total > 50:
-        # Try a few more pages
-        for page in range(1, min(5, (total // 50) + 1)):
-            data2 = await search_amosaa_ops(sivukoko=50, sivu=page)
-            for item in data2.get("data", []):
-                if item.get("id") == ops_id:
-                    return _format_amosaa_ops_detail(item)
+    for page in range(1, min(total_pages, 13)):
+        data = await search_ylops_ops(sivukoko=sivukoko, sivu=page)
+        for item in data.get("data", []):
+            if item.get("id") == ops_id:
+                return extract_ylops_ops_summary(item)
 
     return (
         f"OPS:a ID:llä {ops_id} ei löydy. "
         "Varmista ID hae_paikalliset_opetussuunnitelmat-haulla."
     )
-
-
-def _format_amosaa_ops_detail(item: dict) -> str:
-    import re
-    lines = []
-    ops_nimi = _fi(item.get("nimi"))
-    lines.append(f"**{ops_nimi}**")
-    lines.append(f"ID: {item.get('id')}")
-
-    org = item.get("koulutustoimija", {})
-    if isinstance(org, dict):
-        lines.append(f"Koulutustoimija: {_fi(org.get('nimi'))}")
-
-    peruste = item.get("peruste", {})
-    if isinstance(peruste, dict):
-        lines.append(f"Pohjautuu perusteeseen: {_fi(peruste.get('nimi'))} (perusteId: {peruste.get('perusteId')})")
-        lines.append(f"Diaarinumero: {item.get('perusteDiaarinumero', '–')}")
-
-    lines.append(f"Tila: {item.get('tila', '–')}")
-    lines.append(f"Luotu: {_ts_to_date(item.get('luotu'))}")
-    lines.append(f"Muokattu: {_ts_to_date(item.get('muokattu'))}")
-
-    kielet = item.get("julkaisukielet", [])
-    if kielet:
-        lines.append(f"Julkaisukielet: {', '.join(kielet)}")
-
-    kuvaus = _fi(item.get("kuvaus", {}))
-    if kuvaus:
-        clean = re.sub(r"<[^>]+>", " ", kuvaus)
-        clean = " ".join(clean.split())
-        if len(clean) > 3000:
-            clean = clean[:3000] + "…"
-        lines.append(f"\nKuvaus:\n{clean}")
-
-    return "\n".join(lines)
 
 
 async def hae_oppiaineet(peruste_id: int) -> str:

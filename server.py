@@ -20,12 +20,13 @@ TYÖNKULKU:
 3. hae_oppiaineet — KÄYTÄ lukion oppiaineiden listaamiseen (lops2019)
    → Palauttaa kaikki oppiaineet, moduulit ja laajuudet opintopisteinä
 
-4. hae_paikalliset_opetussuunnitelmat — KÄYTÄ ammatillisten paikallisten OPS:ien hakuun
-   → Suodata nimellä tai perusteId:llä
-   → HUOM: Vain ammatilliset OPS:t — perusopetuksen/lukion paikalliset OPS:t eivät saatavilla
+4. hae_paikalliset_opetussuunnitelmat — KÄYTÄ perusopetuksen ja lukion paikallisten OPS:ien hakuun
+   → Suodata kunnan tai koulun nimellä (esim. "Tampere", "Helsinki")
+   → Voit suodattaa koulutustyypillä: koulutustyyppi_16=perusopetus, koulutustyyppi_2=lukio
 
 5. hae_paikallinen_opetussuunnitelma — KÄYTÄ kun sinulla on paikallisen OPS:n ID
-   → Palauttaa OPS:n kuvauksen ja rakenteen
+   → Palauttaa OPS:n metatiedot: kunta, koulut, koulutustyyppi, julkaisuaika
+   → HUOM: Sisältötekstit eivät saatavilla API:n kautta — ohjaa käyttäjä ePerusteet-sivustolle
 
 HAKUVINKIT:
 - Käytä suomenkielisiä termejä: "perusopetus", "lukio", "matematiikka", "ammatillinen"
@@ -33,7 +34,8 @@ HAKUVINKIT:
 - Tunnettuja ID:itä: 419550=perusopetus 2014, 6828810=lukio 2019
 
 MITÄ TÄMÄ PALVELU EI VOI TEHDÄ:
-- Perusopetuksen tai lukion paikallisia OPS:ja (vain kansalliset perusteet)
+- Paikallisten OPS:ien sisältötekstejä (API:n detail-endpoint poissa käytöstä — ohjaa ePerusteet-sivustolle)
+- Ammatillisia paikallisia OPS:ja (ne ovat erillisessä AMOSAA-palvelussa)
 - Reaaliaikainen tilastodata tai koulukohtainen vertailu
 
 Datalähde: https://eperusteet.opintopolku.fi | Kieli: suomi

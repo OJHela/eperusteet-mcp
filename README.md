@@ -24,7 +24,8 @@ Lets municipal education officials, school principals, and curriculum planners i
 
 - "Mitä matematiikan tavoitteita perusopetuksen OPS:n perusteissa 2014 on vuosiluokille 7–9?"
 - "Mitä pakollisia oppiaineita lukion OPS:n perusteet 2019 edellyttää?"
-- "Onko ammatillisia paikallisia OPS:ja julkaistu Keski-Pohjanmaalla?"
+- "Onko Tampereen kaupungilla julkaistu paikallinen perusopetuksen OPS?"
+- "Listaa Helsingin lukioiden paikalliset opetussuunnitelmat."
 
 ## Known education type codes
 
@@ -65,6 +66,7 @@ curl http://localhost:8000/health  # → OK
 
 ## Notes
 
-- **eperusteet-ylops-service** (perusopetus/lukio local OPS) returns 500 on all public endpoints as of 2026-03 — not available
-- Local vocational OPS are served via the **eperusteet-amosaa-service** (works)
-- Full peruste responses can be 9MB — tools extract structured summaries
+- **eperusteet-ylops-service** `/external/opetussuunnitelmat` list endpoint works (1,241+ documents). The per-ID detail endpoint (`/{id}`) returns 500 — tools return list-level metadata only and direct users to the web UI for full content.
+- Server-side filters `koulutustyyppi`, `kunta`, `perusteId` are ignored by the ylops API — `koulutustyyppi` is applied client-side in the tool.
+- Local vocational OPS (ammatilliset) are in a separate **eperusteet-amosaa-service** — not covered by this server.
+- Full peruste responses can be 9MB — tools extract structured summaries.

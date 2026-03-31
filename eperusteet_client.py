@@ -1,11 +1,10 @@
 """
 HTTP client for ePerusteet API.
 
-Two backend services:
-  eperusteet-service  → national frameworks (perusteet)
-  eperusteet-amosaa-service → vocational local OPS (paikalliset opetussuunnitelmat)
-
-Note: eperusteet-ylops-service returns 500 on all public endpoints (service down).
+Three backend services:
+  eperusteet-service       → national frameworks (perusteet)
+  eperusteet-ylops-service → local OPS for perusopetus + lukio (list works; detail endpoint returns 500)
+  eperusteet-amosaa-service → vocational local OPS (paikalliset ammatilliset OPS)
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import time
 import httpx
 
 BASE_PERUSTEET = "https://eperusteet.opintopolku.fi/eperusteet-service/api/external"
+BASE_YLOPS = "https://eperusteet.opintopolku.fi/eperusteet-ylops-service/api/external"
 BASE_AMOSAA = "https://eperusteet.opintopolku.fi/eperusteet-amosaa-service/api/julkinen"
 HEADERS = {"User-Agent": "intric-mcp/1.0 (ePerusteet MCP server)"}
 TIMEOUT = 30.0
@@ -88,6 +88,61 @@ async def get_lops2019_oppiaine(peruste_id: int, oppiaine_id: int) -> dict:
     return await _rate_limited_get(
         f"{BASE_PERUSTEET}/peruste/{peruste_id}/lops2019/oppiaineet/{oppiaine_id}"
     )
+
+
+# ── Local OPS for perusopetus + lukio (ylops) ────────────────────────────────
+# Note: /external/opetussuunnitelmat list works; /{id} detail endpoint returns 500.
+# Server-side filters koulutustyyppi/kunta/perusteId are accepted but ignored —
+# filtering must be done client-side.
+
+async def search_ylops_ops(
+    nimi: str | None = None,
+    sivukoko: int = 20,
+    sivu: int = 0,
+) -> dict:
+    params: dict = {"sivukoko": sivukoko, "sivu": sivu}
+    if nimi:
+        params["nimi"] = nimi
+    return await _rate_limited_get(f"{BASE_YLOPS}/opetussuunnitelmat", params)
+
+
+def _ylops_kunta(organisaatiot: list) -> str:
+    """Extract municipality name from an organisaatiot list."""
+    for org in organisaatiot:
+        if isinstance(org, dict) and "Kunta" in org.get("tyypit", []):
+            return _fi(org.get("nimi")) or "–"
+    return "–"
+
+
+def _ylops_koulut(organisaatiot: list) -> list[str]:
+    """Extract school names from an organisaatiot list."""
+    return [
+        _fi(org.get("nimi"))
+        for org in organisaatiot
+        if isinstance(org, dict) and "Oppilaitos" in org.get("tyypit", [])
+    ]
+
+
+def extract_ylops_ops_summary(item: dict) -> str:
+    lines = []
+    nimi = _fi(item.get("nimi", {}))
+    lines.append(f"**{nimi}**")
+    lines.append(f"  ID: {item.get('id')}")
+    lines.append(f"  Koulutustyyppi: {item.get('koulutustyyppi', '–')}")
+    orgs = item.get("organisaatiot") or []
+    kunta = _ylops_kunta(orgs)
+    if kunta != "–":
+        lines.append(f"  Kunta: {kunta}")
+    koulut = _ylops_koulut(orgs)
+    if koulut:
+        koulut_str = ", ".join(koulut[:3])
+        if len(koulut) > 3:
+            koulut_str += f" (+{len(koulut) - 3} muuta)"
+        lines.append(f"  Koulut: {koulut_str}")
+    julkaistu = _ts_to_date(item.get("julkaisuaika"))
+    if julkaistu:
+        lines.append(f"  Julkaistu: {julkaistu}")
+    return "\n".join(lines)
 
 
 # ── Vocational local OPS (AMOSAA) ─────────────────────────────────────────────
