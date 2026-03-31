@@ -90,6 +90,12 @@ async def get_lops2019_oppiaine(peruste_id: int, oppiaine_id: int) -> dict:
     )
 
 
+async def get_perusopetus_oppiaine(peruste_id: int, oppiaine_id: int) -> dict:
+    return await _rate_limited_get(
+        f"{BASE_PERUSTEET}/peruste/{peruste_id}/perusopetus/oppiaineet/{oppiaine_id}"
+    )
+
+
 # ── Local OPS for perusopetus + lukio (ylops) ────────────────────────────────
 # Note: /external/opetussuunnitelmat list works; /{id} detail endpoint returns 500.
 # Server-side filters koulutustyyppi/kunta/perusteId are accepted but ignored —

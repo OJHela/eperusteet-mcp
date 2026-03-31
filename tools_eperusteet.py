@@ -9,6 +9,7 @@ from eperusteet_client import (
     get_peruste,
     get_lops2019_oppiaineet,
     get_lops2019_oppiaine,
+    get_perusopetus_oppiaine,
     search_ylops_ops,
     extract_peruste_summary,
     extract_peruste_structure,
@@ -297,3 +298,160 @@ async def hae_oppiaineet(peruste_id: int) -> str:
             lines.append(f"  - {nimi} (ID: {oa_id})")
 
     return "\n".join(lines)
+
+
+# ── Grade-level mapping ───────────────────────────────────────────────────────
+_VUOSILUOKKA_GROUPS = {
+    "1-2": {"vuosiluokka_1", "vuosiluokka_2"},
+    "3-6": {"vuosiluokka_3", "vuosiluokka_4", "vuosiluokka_5", "vuosiluokka_6"},
+    "7-9": {"vuosiluokka_7", "vuosiluokka_8", "vuosiluokka_9"},
+}
+
+
+async def hae_oppiaine_tiedot(
+    peruste_id: int,
+    oppiaine_id: int,
+    vuosiluokat: str | None = None,
+) -> str:
+    """
+    Hae yksittäisen oppiaineen täydelliset tavoitteet, sisältöalueet ja arviointi.
+
+    USE THIS TOOL WHEN:
+    - Käyttäjä kysyy "Mitä tavoitteita matematiikalle on vuosiluokille 7–9?"
+    - Käyttäjä haluaa tietää oppiaineen sisältöalueet tai arviointikriteerit
+    - Käyttäjä kysyy "Mitä äidinkielen opetuksen pitää sisältää?"
+    - Käyttäjä haluaa lukion oppiaineen moduulien kuvaukset
+
+    WORKFLOW:
+    → Hae ensin oppiaine-ID: kutsu hae_peruste_tiedot tai hae_oppiaineet
+    → Sitten kutsu tämä työkalu halutuilla parametreilla
+
+    Parameters:
+    - peruste_id: Perusteen numerinen ID (esim. 419550 = perusopetus 2014)
+    - oppiaine_id: Oppiaineen numerinen ID (saatu hae_peruste_tiedot tai hae_oppiaineet -kutsuista)
+    - vuosiluokat: Rajaa perusopetuksessa vuosiluokkaryhmään: "1-2", "3-6" tai "7-9"
+      (ei käytetä lukiossa)
+    """
+    import re
+
+    def _clean(html: str | None) -> str:
+        if not html:
+            return ""
+        return " ".join(re.sub(r"<[^>]+>", " ", html).split())
+
+    # ── Try perusopetus endpoint first ────────────────────────────────────────
+    try:
+        d = await get_perusopetus_oppiaine(peruste_id, oppiaine_id)
+    except Exception:
+        d = {}
+
+    vlk_list = d.get("vuosiluokkakokonaisuudet", [])
+
+    if vlk_list:
+        # Perusopetus oppiaine
+        nimi = _fi(d.get("nimi"))
+        lines = [f"**{nimi}** — tavoitteet ja sisältö (perusopetus, peruste {peruste_id})\n"]
+
+        # Filter by requested grade group
+        if vuosiluokat and vuosiluokat in _VUOSILUOKKA_GROUPS:
+            wanted = _VUOSILUOKKA_GROUPS[vuosiluokat]
+            vlk_list = [
+                v for v in vlk_list
+                if set(v.get("vuosiluokat", [])) & wanted
+            ]
+
+        for vlk in vlk_list:
+            luokat = vlk.get("vuosiluokat", [])
+            luokat_str = ", ".join(sorted(l.replace("vuosiluokka_", "") for l in luokat))
+            lines.append(f"## Vuosiluokat {luokat_str}\n")
+
+            # Tavoitteet
+            tavoitteet = vlk.get("tavoitteet", [])
+            if tavoitteet:
+                lines.append(f"### Tavoitteet ({len(tavoitteet)} kpl)")
+                for t in tavoitteet:
+                    tavoite = _clean(_fi(t.get("tavoite")))
+                    if tavoite:
+                        lines.append(f"- {tavoite}")
+                lines.append("")
+
+            # Sisältöalueet
+            sisaltoalueet = vlk.get("sisaltoalueet", [])
+            if sisaltoalueet:
+                lines.append(f"### Sisältöalueet ({len(sisaltoalueet)} kpl)")
+                for s in sisaltoalueet:
+                    s_nimi = _clean(_fi(s.get("nimi")))
+                    s_kuvaus = _clean(_fi(s.get("kuvaus")))
+                    if s_nimi:
+                        lines.append(f"**{s_nimi}**")
+                    if s_kuvaus:
+                        lines.append(f"{s_kuvaus[:400]}")
+                lines.append("")
+
+            # Arviointi
+            arviointi = vlk.get("arviointi", {})
+            if arviointi:
+                arv_teksti = _clean(_fi(arviointi.get("arvioinninKuvaus") or arviointi.get("kuvaus")))
+                if arv_teksti:
+                    lines.append("### Arviointi")
+                    lines.append(arv_teksti[:600])
+                    lines.append("")
+
+        result = "\n".join(lines)
+        if len(result) > 10000:
+            result = result[:10000] + "\n\n[Sisältöä katkaistu — rajaa vuosiluokat-parametrilla]"
+        return result
+
+    # ── Try lukio lops2019 endpoint ───────────────────────────────────────────
+    try:
+        d = await get_lops2019_oppiaine(peruste_id, oppiaine_id)
+    except Exception:
+        return (
+            f"Oppiainetta ID {oppiaine_id} ei löydy perusteesta {peruste_id}. "
+            "Tarkista ID hae_peruste_tiedot- tai hae_oppiaineet-kutsulla."
+        )
+
+    nimi = _fi(d.get("nimi"))
+    lines = [f"**{nimi}** — moduulit ja tavoitteet (lukio lops2019, peruste {peruste_id})\n"]
+
+    tehtava = _clean(_fi(d.get("tehtava")))
+    if tehtava:
+        lines.append(f"### Oppiaineen tehtävä\n{tehtava[:600]}\n")
+
+    tavoitteet = d.get("tavoitteet", {})
+    if isinstance(tavoitteet, dict):
+        tav_teksti = _clean(_fi(tavoitteet))
+        if tav_teksti:
+            lines.append(f"### Tavoitteet\n{tav_teksti[:600]}\n")
+
+    moduulit = d.get("moduulit") or []
+    oppimaarat = d.get("oppimaarat") or []
+
+    if moduulit:
+        lines.append(f"### Moduulit ({len(moduulit)} kpl)\n")
+        for m in moduulit:
+            m_nimi = _fi(m.get("nimi"))
+            koodi = m.get("koodi", {}).get("arvo", "") if isinstance(m.get("koodi"), dict) else ""
+            pak = "[pakollinen]" if m.get("pakollinen") else "[valinnainen]"
+            laajuus = m.get("laajuus")
+            la_str = f" {laajuus} op" if laajuus else ""
+            lines.append(f"**{m_nimi}** ({koodi}){la_str} {pak}")
+            kuvaus = _clean(_fi(m.get("kuvaus")))
+            if kuvaus:
+                lines.append(f"{kuvaus[:400]}")
+            lines.append("")
+    elif oppimaarat:
+        # This oppiaine has sub-syllabuses (oppimäärät) — list them with IDs
+        # so the caller can drill into a specific oppimäärä
+        lines.append(f"### Oppimäärät ({len(oppimaarat)} kpl)\n")
+        lines.append("Tämä oppiaine jakautuu oppimääriin. Hae tarkemmat tiedot kutsumalla")
+        lines.append("hae_oppiaine_tiedot uudelleen alla olevalla oppimäärä-ID:llä:\n")
+        for om in oppimaarat:
+            om_nimi = _fi(om.get("nimi"))
+            om_id = om.get("id")
+            lines.append(f"  - {om_nimi} (ID: {om_id})")
+
+    result = "\n".join(lines)
+    if len(result) > 10000:
+        result = result[:10000] + "\n\n[Sisältöä katkaistu]"
+    return result

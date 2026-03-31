@@ -15,6 +15,7 @@ from tools_eperusteet import (
     hae_paikalliset_opetussuunnitelmat,
     hae_paikallinen_opetussuunnitelma,
     hae_oppiaineet,
+    hae_oppiaine_tiedot,
 )
 
 results = []
@@ -133,6 +134,34 @@ test(
     hae_perusteet,
     voimassa=True,
     expected_min_chars=50,
+)
+
+# 11. Perusopetus oppiaine — matematiikka vuosiluokat 7-9
+test(
+    "hae_oppiaine_tiedot — matematiikka (466344) vuosiluokat 7-9",
+    hae_oppiaine_tiedot,
+    419550,
+    466344,
+    vuosiluokat="7-9",
+    expected_min_chars=300,
+)
+
+# 12. Lukio oppiaine — biologia (lops2019, has moduulit directly)
+test(
+    "hae_oppiaine_tiedot — biologia lukio (6832790)",
+    hae_oppiaine_tiedot,
+    6828810,
+    6832790,
+    expected_min_chars=300,
+)
+
+# 13. Lukio oppiaine with oppimaarat — äidinkieli (6828950) lists sub-syllabuses
+test(
+    "hae_oppiaine_tiedot — äidinkieli lukio (6828950, oppimaarat)",
+    hae_oppiaine_tiedot,
+    6828810,
+    6828950,
+    expected_min_chars=100,
 )
 
 # ── Summary ──────────────────────────────────────────────────────────────────

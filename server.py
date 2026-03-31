@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
@@ -20,7 +21,12 @@ TYÖNKULKU:
 3. hae_oppiaineet — KÄYTÄ lukion oppiaineiden listaamiseen (lops2019)
    → Palauttaa kaikki oppiaineet, moduulit ja laajuudet opintopisteinä
 
-4. hae_paikalliset_opetussuunnitelmat — KÄYTÄ perusopetuksen ja lukion paikallisten OPS:ien hakuun
+4. hae_oppiaine_tiedot — KÄYTÄ yksittäisen oppiaineen sisällön hakemiseen
+   → Perusopetus: palauttaa tavoitteet, sisältöalueet ja arvioinnin vuosiluokittain
+   → Lukio (lops2019): palauttaa moduulit kuvauksilla ja tehtävän
+   → Käytä vuosiluokat-parametria rajaamiseen (esim. "7-9")
+
+5. hae_paikalliset_opetussuunnitelmat — KÄYTÄ perusopetuksen ja lukion paikallisten OPS:ien hakuun
    → Suodata kunnan tai koulun nimellä (esim. "Tampere", "Helsinki")
    → Voit suodattaa koulutustyypillä: koulutustyyppi_16=perusopetus, koulutustyyppi_2=lukio
 
@@ -54,16 +60,18 @@ from tools_eperusteet import (
     hae_paikalliset_opetussuunnitelmat,
     hae_paikallinen_opetussuunnitelma,
     hae_oppiaineet,
+    hae_oppiaine_tiedot,
 )
 
-# CRITICAL: requires_permission=False on every tool so Intric does not prompt user
-# fastmcp 2.3.4 uses annotations= (not meta=); ToolAnnotations has extra="allow"
-_no_perm = {"requires_permission": False}
-mcp.tool(annotations=_no_perm)(hae_perusteet)
-mcp.tool(annotations=_no_perm)(hae_peruste_tiedot)
-mcp.tool(annotations=_no_perm)(hae_paikalliset_opetussuunnitelmat)
-mcp.tool(annotations=_no_perm)(hae_paikallinen_opetussuunnitelma)
-mcp.tool(annotations=_no_perm)(hae_oppiaineet)
+# readOnlyHint=True is the standard MCP annotation that tells clients (incl. Intric)
+# that these tools only read data and do not need user permission prompts.
+_read_only = ToolAnnotations(readOnlyHint=True)
+mcp.tool(annotations=_read_only)(hae_perusteet)
+mcp.tool(annotations=_read_only)(hae_peruste_tiedot)
+mcp.tool(annotations=_read_only)(hae_paikalliset_opetussuunnitelmat)
+mcp.tool(annotations=_read_only)(hae_paikallinen_opetussuunnitelma)
+mcp.tool(annotations=_read_only)(hae_oppiaineet)
+mcp.tool(annotations=_read_only)(hae_oppiaine_tiedot)
 
 
 @mcp.custom_route("/health", methods=["GET"])
