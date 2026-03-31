@@ -156,7 +156,15 @@ async def hae_paikalliset_opetussuunnitelmat(
     sivukoko = min(sivukoko, MAX_ROWS)
     # Fetch more if client-side koulutustyyppi filtering is needed
     fetch_size = min(100, sivukoko * 5) if koulutustyyppi else sivukoko
-    data = await search_ylops_ops(nimi=nimi, sivukoko=fetch_size)
+
+    # Finnish city names inflect in the database (e.g. Helsinki→Helsingin, Turku→Turun).
+    # If no results with the given nimi, retry dropping the last 2 chars as a stem fallback.
+    search_nimi = nimi
+    data = await search_ylops_ops(nimi=search_nimi, sivukoko=fetch_size)
+    if nimi and not data.get("data") and len(nimi) > 4:
+        search_nimi = nimi[:-2]
+        data = await search_ylops_ops(nimi=search_nimi, sivukoko=fetch_size)
+
     items = data.get("data", [])
     total = data.get("kokonaism\u00e4\u00e4r\u00e4", len(items))
 
