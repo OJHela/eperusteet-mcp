@@ -72,4 +72,7 @@ async def health(request: Request) -> PlainTextResponse:
 
 
 # No-auth server
+# redirect_slashes=False: prevents Starlette 307-redirecting POST /mcp → /mcp/
+# which breaks MCP clients that don't re-POST after a redirect.
 app = mcp.http_app()
+app.router.redirect_slashes = False
