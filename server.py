@@ -72,7 +72,17 @@ async def health(request: Request) -> PlainTextResponse:
 
 
 # No-auth server
-# redirect_slashes=False: prevents Starlette 307-redirecting POST /mcp → /mcp/
-# which breaks MCP clients that don't re-POST after a redirect.
-app = mcp.http_app()
-app.router.redirect_slashes = False
+# Starlette Mount("/mcp") expects /mcp/ (trailing slash).
+# Some MCP clients (e.g. Intric) POST to /mcp and don't re-POST after a 307 redirect.
+# This ASGI middleware silently rewrites /mcp → /mcp/ before routing so no redirect happens.
+class _RewriteMcpPath:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            scope = {**scope, "path": "/mcp/", "raw_path": b"/mcp/"}
+        await self.app(scope, receive, send)
+
+
+app = _RewriteMcpPath(mcp.http_app())
