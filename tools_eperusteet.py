@@ -416,6 +416,22 @@ async def hae_oppiaine_tiedot(
         result = "\n".join(lines)
         if len(result) > 10000:
             result = result[:10000] + "\n\n[Sisältöä katkaistu — rajaa vuosiluokat-parametrilla]"
+
+        # If no actual content was found, this is likely a parent subject whose content
+        # lives in oppimäärät (e.g. Äidinkieli ja kirjallisuus → Suomen kieli ja kirjallisuus).
+        all_vlk = d.get("vuosiluokkakokonaisuudet") or []
+        has_content = any(v.get("tavoitteet") or v.get("sisaltoalueet") for v in all_vlk)
+        if not has_content:
+            oppimaarat = d.get("oppimaarat", [])
+            if oppimaarat:
+                result += (
+                    "\n\nTämä oppiaine jakautuu oppimääriin — varsinainen sisältö on "
+                    "oppimääräkohtaisissa tiedoissa. Kutsu hae_oppiaine_tiedot "
+                    "alla olevalla oppimäärä-ID:llä:\n"
+                )
+                for om in oppimaarat:
+                    result += f"  - {_fi(om.get('nimi'))} (ID: {om.get('id')})\n"
+
         return result
 
     # ── Try lukio lops2019 endpoint ───────────────────────────────────────────
