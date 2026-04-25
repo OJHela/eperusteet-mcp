@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-
 from fastmcp import FastMCP
 from mcp.server.fastmcp import Icon
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
-
-import eperusteet_client
 
 INSTRUCTION_STRING = """
 Olet yhteydessä ePerusteet-palveluun — Opetushallituksen opetussuunnitelmat ja tutkinnot.
@@ -51,14 +47,6 @@ MITÄ TÄMÄ PALVELU EI VOI TEHDÄ:
 Datalähde: https://eperusteet.opintopolku.fi | Kieli: suomi
 """
 
-@asynccontextmanager
-async def lifespan(app):
-    yield
-    client = eperusteet_client._http_client
-    if client and not client.is_closed:
-        await client.aclose()
-
-
 icon = Icon(src="https://www.oph.fi/themes/custom/ophfi/logo.svg")
 
 mcp = FastMCP(
@@ -94,4 +82,4 @@ async def health(request: Request) -> PlainTextResponse:
     return PlainTextResponse("OK")
 
 
-app = mcp.http_app(lifespan=lifespan)
+app = mcp.http_app()
