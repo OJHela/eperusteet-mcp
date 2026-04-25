@@ -9,7 +9,10 @@ Three backend services:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
+from typing import Any
+
 import httpx
 
 BASE_PERUSTEET = "https://eperusteet.opintopolku.fi/eperusteet-service/api/external"
@@ -17,21 +20,56 @@ BASE_YLOPS = "https://eperusteet.opintopolku.fi/eperusteet-ylops-service/api/ext
 BASE_AMOSAA = "https://eperusteet.opintopolku.fi/eperusteet-amosaa-service/api/julkinen"
 HEADERS = {"User-Agent": "intric-mcp/1.0 (ePerusteet MCP server)"}
 TIMEOUT = 30.0
-_last_request_time: float = 0.0
 _RATE_LIMIT_DELAY = 0.5  # 2 req/s max
+_CACHE_TTL = 3600.0  # 1 hour — peruste data rarely changes
+
+_http_client: httpx.AsyncClient | None = None
+_rate_lock = asyncio.Lock()
+_last_request_time: float = 0.0
+_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=TIMEOUT, headers=HEADERS)
+    return _http_client
+
+
+def _cache_key(url: str, params: dict | None) -> str:
+    if params:
+        pstr = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        return f"{url}?{pstr}"
+    return url
 
 
 async def _rate_limited_get(url: str, params: dict | None = None) -> dict | list:
     global _last_request_time
+    key = _cache_key(url, params)
+
+    # Fast path: check cache without lock
     now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < _RATE_LIMIT_DELAY:
-        await asyncio.sleep(_RATE_LIMIT_DELAY - elapsed)
-    async with httpx.AsyncClient(timeout=TIMEOUT, headers=HEADERS) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
+    cached = _cache.get(key)
+    if cached and now - cached[0] < _CACHE_TTL:
+        return cached[1]
+
+    async with _rate_lock:
+        # Re-check under lock (another coroutine may have populated it)
+        now = time.time()
+        cached = _cache.get(key)
+        if cached and now - cached[0] < _CACHE_TTL:
+            return cached[1]
+
+        elapsed = now - _last_request_time
+        if elapsed < _RATE_LIMIT_DELAY:
+            await asyncio.sleep(_RATE_LIMIT_DELAY - elapsed)
         _last_request_time = time.time()
-        return r.json()
+
+    r = await _get_client().get(url, params=params)
+    r.raise_for_status()
+    data = r.json()
+    _cache[key] = (time.time(), data)
+    return data
 
 
 def _fi(obj: dict | None) -> str:
@@ -50,6 +88,11 @@ def _ts_to_date(ms: int | None) -> str | None:
     from datetime import datetime, timezone
     dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
     return dt.strftime("%Y-%m-%d")
+
+
+def _strip_html(text: str) -> str:
+    """Strip HTML tags and collapse whitespace."""
+    return " ".join(re.sub(r"<[^>]+>", " ", text).split())
 
 
 # ── National frameworks (perusteet) ──────────────────────────────────────────
@@ -225,14 +268,13 @@ def extract_peruste_structure(d: dict, max_chars: int = 8000) -> str:
                 tunniste = vl.get("tunniste", "")
                 lines.append(f"  - {nimi} ({tunniste})")
 
-    # Lukio lops2019: subjects from the oppiaineet key if present
+    # Lukio lops2019: brief note — full oppiaineet are fetched separately by the tool
     lops = d.get("lops2019")
     if lops and isinstance(lops, dict):
         oppiaineet = lops.get("oppiaineet", [])
         if oppiaineet:
-            lines.append("\n## Oppiaineet (lukio)")
-            for oa in oppiaineet[:30]:
-                lines.append(f"  - {_fi(oa.get('nimi'))} (ID: {oa.get('id')})")
+            lines.append(f"\n## Lukio (lops2019): {len(oppiaineet)} oppiainetta")
+            lines.append("Täydet tiedot moduuleineen listattu alla.")
 
     # Vocational tutkinnonosat
     tutkinnonosat = d.get("tutkinnonOsat")
@@ -262,7 +304,7 @@ def extract_peruste_structure(d: dict, max_chars: int = 8000) -> str:
 
     result = "\n".join(lines)
     if len(result) > max_chars:
-        result = result[:max_chars] + "\n\n[Sisältöä katkaistu — käytä hae_oppiaineet saadaksesi täyden oppiainelistan]"
+        result = result[:max_chars] + "\n\n[Sisältöä katkaistu]"
     return result
 
 
@@ -275,25 +317,19 @@ def extract_oppiaine_summary(oa: dict, include_modules: bool = True) -> str:
     koodi_arvo = koodi.get("arvo", "") if isinstance(koodi, dict) else ""
     lines.append(f"**{nimi}** (ID: {oa_id}, koodi: {koodi_arvo})")
 
-    # Laaja-alainen osaaminen description
     lao = oa.get("laajaalaisetosaamiset", {})
     if isinstance(lao, dict):
         kuvaus_fi = _fi(lao.get("kuvaus"))
         if kuvaus_fi and len(kuvaus_fi) > 10:
-            # Strip HTML tags simply
-            import re
-            clean = re.sub(r"<[^>]+>", " ", kuvaus_fi)
-            clean = " ".join(clean.split())[:600]
+            clean = _strip_html(kuvaus_fi)[:600]
             lines.append(f"\nLaaja-alainen osaaminen:\n{clean}")
 
-    # Oppimäärät (sub-syllabuses)
     oppimaarat = oa.get("oppimaarat", [])
     if isinstance(oppimaarat, list) and oppimaarat:
         lines.append("\nOppimäärät:")
         for om in oppimaarat[:10]:
             lines.append(f"  - {_fi(om.get('nimi'))} (ID: {om.get('id')})")
 
-    # Moduulit (modules) - show count if many
     moduulit = oa.get("moduulit")
     if moduulit and isinstance(moduulit, list):
         lines.append(f"\nModuulit ({len(moduulit)} kpl):")

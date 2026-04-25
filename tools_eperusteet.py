@@ -17,6 +17,7 @@ from eperusteet_client import (
     extract_ylops_ops_summary,
     _fi,
     _ts_to_date,
+    _strip_html,
 )
 
 MAX_ROWS = 20  # hard cap per CLAUDE.md Rule 1
@@ -66,7 +67,7 @@ async def hae_perusteet(
         sivukoko=MAX_ROWS,
     )
     items = data.get("data", [])
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", len(items)))
+    total = data.get("kokonaismäärä", len(items))
 
     if not items:
         tips = []
@@ -102,8 +103,10 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
     - Käyttäjä kysyy perusteen voimassaolosta, laajuudesta tai rakenteesta
     - Jatko hae_perusteet-haun jälkeen, kun ID on saatu
 
+    HUOM: Lukion (lops2019) perusteille tämä palauttaa automaattisesti myös
+    kaikki oppiaineet moduuleineen — erillistä hae_oppiaineet-kutsua ei tarvita.
+
     THEN CALL:
-    → Lukion peruste (toteutus=lops2019)? → kutsu hae_oppiaineet saadaksesi täyden oppiainelistan
     → Paikallinen OPS? → kutsu hae_paikalliset_opetussuunnitelmat perusteId:llä
 
     DO NOT USE WHEN:
@@ -123,7 +126,24 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
     if "syy" in d:
         return f"Virhe: {d.get('syy', 'Tuntematon virhe')} — perusteId {peruste_id} ei löydy."
 
-    return extract_peruste_structure(d, max_chars=8000)
+    result = extract_peruste_structure(d, max_chars=8000)
+
+    # For lops2019, automatically include full oppiaineet — saves the model an extra tool call
+    is_lops2019 = bool(d.get("lops2019")) or d.get("toteutus") == "lops2019"
+    if is_lops2019:
+        oppiaineet = await get_lops2019_oppiaineet(peruste_id)
+        if oppiaineet:
+            result += f"\n\n## Oppiaineet ({len(oppiaineet)} kpl) — moduulit ja laajuudet\n"
+            for oa in oppiaineet[:MAX_ROWS]:
+                result += "\n" + extract_oppiaine_summary(oa)
+                result += "\n"
+            if len(oppiaineet) > MAX_ROWS:
+                remaining = oppiaineet[MAX_ROWS:]
+                result += f"\n[Lisää oppiaineita ({len(remaining)} kpl):]"
+                for oa in remaining:
+                    result += f"\n  - {_fi(oa.get('nimi'))} (ID: {oa.get('id')})"
+
+    return result
 
 
 async def hae_paikalliset_opetussuunnitelmat(
@@ -332,12 +352,8 @@ async def hae_oppiaine_tiedot(
     - vuosiluokat: Rajaa perusopetuksessa vuosiluokkaryhmään: "1-2", "3-6" tai "7-9"
       (ei käytetä lukiossa)
     """
-    import re
-
     def _clean(html: str | None) -> str:
-        if not html:
-            return ""
-        return " ".join(re.sub(r"<[^>]+>", " ", html).split())
+        return _strip_html(html) if html else ""
 
     # ── Try perusopetus endpoint first ────────────────────────────────────────
     try:
