@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
+
+import eperusteet_client
 
 INSTRUCTION_STRING = """
 Olet yhteydessä ePerusteet-palveluun — Opetushallituksen opetussuunnitelmat ja tutkinnot.
@@ -10,15 +14,14 @@ Olet yhteydessä ePerusteet-palveluun — Opetushallituksen opetussuunnitelmat j
 TYÖNKULKU:
 1. hae_perusteet — KÄYTÄ ENSIN kun käyttäjä kysyy kansallisista perusteista
    → Tuloksia löytyi? → kutsu hae_peruste_tiedot ID:llä
-   → Lukion peruste (lops2019)? → kutsu hae_oppiaineet oppiainelistan saamiseksi
    → Ei tuloksia? → kokeile laajempaa hakua, poista suodattimet
 
 2. hae_peruste_tiedot — KÄYTÄ kun sinulla on peruste-ID
    → Palauttaa rakenteen: oppiaineet, tutkinnonosat, vuosiluokkakokonaisuudet
-   → Lukio? → kutsu hae_oppiaineet tarkemmalle oppiaineja moduulilistalle
+   → Lukio (lops2019): palauttaa automaattisesti kaikki oppiaineet moduuleineen
+     — erillistä hae_oppiaineet-kutsua EI tarvita
 
-3. hae_oppiaineet — KÄYTÄ lukion oppiaineiden listaamiseen (lops2019)
-   → Palauttaa kaikki oppiaineet, moduulit ja laajuudet opintopisteinä
+3. hae_oppiaineet — KÄYTÄ vain jos tarvitset lukion oppiaineet erikseen ilman perusteen muita tietoja
 
 4. hae_paikalliset_opetussuunnitelmat — KÄYTÄ ammatillisten paikallisten OPS:ien hakuun
    → Suodata nimellä tai perusteId:llä
@@ -38,6 +41,16 @@ MITÄ TÄMÄ PALVELU EI VOI TEHDÄ:
 
 Datalähde: https://eperusteet.opintopolku.fi | Kieli: suomi
 """
+
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    # Close persistent HTTP client on shutdown
+    client = eperusteet_client._http_client
+    if client and not client.is_closed:
+        await client.aclose()
+
 
 mcp = FastMCP(
     name="ePerusteet MCP",
@@ -70,4 +83,4 @@ async def health(request: Request) -> PlainTextResponse:
 
 
 # No-auth server
-app = mcp.http_app()
+app = mcp.http_app(lifespan=lifespan)

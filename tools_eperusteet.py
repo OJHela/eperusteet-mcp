@@ -8,13 +8,14 @@ from eperusteet_client import (
     search_perusteet,
     get_peruste,
     get_lops2019_oppiaineet,
-    get_lops2019_oppiaine,
+    get_amosaa_ops,
     search_amosaa_ops,
     extract_peruste_summary,
     extract_peruste_structure,
     extract_oppiaine_summary,
     _fi,
     _ts_to_date,
+    _strip_html,
 )
 
 MAX_ROWS = 20  # hard cap per CLAUDE.md Rule 1
@@ -38,7 +39,8 @@ async def hae_perusteet(
     THEN CALL:
     → Löytyykö tuloksia? → kutsu hae_peruste_tiedot löydetyllä ID:llä
     → Ei tuloksia? → kokeile laajempaa hakua ilman koulutustyyppisuodatinta
-    → Lukion oppiaineet? → kutsu hae_oppiaineet lukion perusteen ID:llä
+    → Lukion oppiaineet? → kutsu hae_peruste_tiedot lukion perusteen ID:llä
+      (palauttaa automaattisesti oppiaineet moduuleineen)
 
     DO NOT USE WHEN:
     - Käyttäjällä on jo peruste-ID → käytä hae_peruste_tiedot suoraan
@@ -64,7 +66,7 @@ async def hae_perusteet(
         sivukoko=MAX_ROWS,
     )
     items = data.get("data", [])
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", len(items)))
+    total = data.get("kokonaismäärä", len(items))
 
     if not items:
         tips = []
@@ -95,13 +97,14 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
 
     USE THIS TOOL WHEN:
     - Käyttäjällä on peruste-ID (numeerinen) ja haluaa tietää mitä se sisältää
-    - Käyttäjä kysyy "Mitä tavoitteita perusopetuksen OPS 2014 asettaa matematiikalle?"
-    - Käyttäjä haluaa tietää lukion oppiaineet tai ammatillisen tutkinnon osat
+    - Käyttäjä kysyy lukion oppiaineet, moduulit tai ammatillisen tutkinnon osat
     - Käyttäjä kysyy perusteen voimassaolosta, laajuudesta tai rakenteesta
     - Jatko hae_perusteet-haun jälkeen, kun ID on saatu
 
+    HUOM: Lukion (lops2019) perusteille tämä palauttaa automaattisesti myös
+    kaikki oppiaineet moduuleineen — erillistä hae_oppiaineet-kutsua ei tarvita.
+
     THEN CALL:
-    → Lukion peruste (toteutus=lops2019)? → kutsu hae_oppiaineet saadaksesi täyden oppiainelistan
     → Paikallinen OPS? → kutsu hae_paikalliset_opetussuunnitelmat perusteId:llä
 
     DO NOT USE WHEN:
@@ -121,7 +124,24 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
     if "syy" in d:
         return f"Virhe: {d.get('syy', 'Tuntematon virhe')} — perusteId {peruste_id} ei löydy."
 
-    return extract_peruste_structure(d, max_chars=8000)
+    result = extract_peruste_structure(d, max_chars=8000)
+
+    # For lops2019, automatically include full oppiaineet — saves the model an extra tool call
+    is_lops2019 = bool(d.get("lops2019")) or d.get("toteutus") == "lops2019"
+    if is_lops2019:
+        oppiaineet = await get_lops2019_oppiaineet(peruste_id)
+        if oppiaineet:
+            result += f"\n\n## Oppiaineet ({len(oppiaineet)} kpl) — moduulit ja laajuudet\n"
+            for oa in oppiaineet[:MAX_ROWS]:
+                result += "\n" + extract_oppiaine_summary(oa)
+                result += "\n"
+            if len(oppiaineet) > MAX_ROWS:
+                remaining = oppiaineet[MAX_ROWS:]
+                result += f"\n[Lisää oppiaineita ({len(remaining)} kpl):]"
+                for oa in remaining:
+                    result += f"\n  - {_fi(oa.get('nimi'))} (ID: {oa.get('id')})"
+
+    return result
 
 
 async def hae_paikalliset_opetussuunnitelmat(
@@ -158,7 +178,7 @@ async def hae_paikalliset_opetussuunnitelmat(
     sivukoko = min(sivukoko, MAX_ROWS)
     data = await search_amosaa_ops(nimi=nimi, peruste_id=peruste_id, sivukoko=sivukoko)
     items = data.get("data", [])
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", len(items)))
+    total = data.get("kokonaismäärä", len(items))
 
     if not items:
         tips = []
@@ -192,12 +212,9 @@ async def hae_paikalliset_opetussuunnitelmat(
         lines.append(f"  Peruste: {peruste_nimi}")
         lines.append(f"  Tila: {tila} | Luotu: {luotu} | Muokattu: {muokattu}")
 
-        # Include kuvaus excerpt if available
         kuvaus = _fi(item.get("kuvaus", {}))
         if kuvaus:
-            import re
-            clean = re.sub(r"<[^>]+>", " ", kuvaus)
-            clean = " ".join(clean.split())[:300]
+            clean = _strip_html(kuvaus)[:300]
             if clean:
                 lines.append(f"  Kuvaus: {clean}")
         lines.append("")
@@ -216,7 +233,6 @@ async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
     USE THIS TOOL WHEN:
     - Käyttäjällä on paikallisen OPS:n ID (saatu hae_paikalliset_opetussuunnitelmat-hausta)
     - Käyttäjä haluaa tietää OPS:n sisällön, kuvauksen tai rakenteen
-    - Käyttäjä kysyy "Mitä tämä paikallinen OPS sisältää?"
 
     THEN CALL:
     → Tarvitaan kansallinen peruste? → kutsu hae_peruste_tiedot peruste_id:llä
@@ -228,22 +244,20 @@ async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
     Parameters:
     - ops_id: Paikallisen OPS:n numerinen ID (saatu hae_paikalliset_opetussuunnitelmat-hausta)
     """
-    # Try AMOSAA list with sivukoko=1 to get fresh data for this OPS
-    # Note: direct detail endpoint (/opetussuunnitelmat/{id}) returns 500 for AMOSAA
-    # We use the list endpoint filtered by trying to match the ID
-    # Instead, search broadly and find the matching ID from cached results
-    # Since detail endpoint is down, we do a broader search and filter
+    # Try direct endpoint first (may return 500 — known upstream issue)
+    item = await get_amosaa_ops(ops_id)
+    if item:
+        return _format_amosaa_ops_detail(item)
+
+    # Fall back: scan paginated list results
     data = await search_amosaa_ops(sivukoko=50)
     items = data.get("data", [])
-
     for item in items:
         if item.get("id") == ops_id:
             return _format_amosaa_ops_detail(item)
 
-    # Try to find by iterating pages
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", 0))
+    total = data.get("kokonaismäärä", 0)
     if total > 50:
-        # Try a few more pages
         for page in range(1, min(5, (total // 50) + 1)):
             data2 = await search_amosaa_ops(sivukoko=50, sivu=page)
             for item in data2.get("data", []):
@@ -257,7 +271,6 @@ async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
 
 
 def _format_amosaa_ops_detail(item: dict) -> str:
-    import re
     lines = []
     ops_nimi = _fi(item.get("nimi"))
     lines.append(f"**{ops_nimi}**")
@@ -282,8 +295,7 @@ def _format_amosaa_ops_detail(item: dict) -> str:
 
     kuvaus = _fi(item.get("kuvaus", {}))
     if kuvaus:
-        clean = re.sub(r"<[^>]+>", " ", kuvaus)
-        clean = " ".join(clean.split())
+        clean = _strip_html(kuvaus)
         if len(clean) > 3000:
             clean = clean[:3000] + "…"
         lines.append(f"\nKuvaus:\n{clean}")
@@ -296,15 +308,11 @@ async def hae_oppiaineet(peruste_id: int) -> str:
     Listaa lukion opetussuunnitelman oppiaineet (lops2019) peruste-ID:n perusteella.
 
     USE THIS TOOL WHEN:
-    - Käyttäjä kysyy "Mitä oppiaineita lukiossa on OPS 2019:n mukaan?"
-    - Käyttäjä haluaa listata lukion pakolliset ja valinnaiset oppiaineet
-    - Käyttäjä kysyy oppiaineiden laajuuksista (opintopisteet) lukiossa
-    - Käyttäjä haluaa tietää tietyn oppiaineen moduulit tai oppimäärät
-    - Jatko hae_peruste_tiedot-kutsun jälkeen, kun toteutus=lops2019
+    - Haluat vain oppiainelistan ilman perusteen muita tietoja
+    - Jatko hae_peruste_tiedot-kutsun jälkeen, kun tarvitaan lisää oppiaineiden tietoja
 
-    THEN CALL:
-    → Tarvitaan tarkemmat tiedot oppiaineesta? → kutsu hae_peruste_tiedot
-      oppiaineen ID:llä (ei saatavilla tällä hetkellä) tai lue moduulit tästä vastauksesta
+    HUOM: hae_peruste_tiedot palauttaa lops2019-perusteille oppiaineet automaattisesti.
+    Käytä tätä työkalua vain jos tarvitset oppiaineet erikseen.
 
     DO NOT USE WHEN:
     - Peruste ei ole lukion peruste (lops2019) → käytä hae_peruste_tiedot
@@ -315,9 +323,6 @@ async def hae_oppiaineet(peruste_id: int) -> str:
       Tunnetut lukion perusteet:
         6828810 = Lukion OPS:n perusteet 2019
         1372910 = Lukion OPS:n perusteet 2015
-
-    Hakuohjeet:
-    - Jos et tiedä ID:tä, hae ensin: hae_perusteet(koulutustyyppi="koulutustyyppi_2")
     """
     oppiaineet = await get_lops2019_oppiaineet(peruste_id)
 
