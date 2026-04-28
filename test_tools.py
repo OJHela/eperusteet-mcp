@@ -15,6 +15,7 @@ from tools_eperusteet import (
     hae_paikalliset_opetussuunnitelmat,
     hae_paikallinen_opetussuunnitelma,
     hae_oppiaineet,
+    hae_oppiaine_tiedot,
 )
 
 results = []
@@ -96,27 +97,35 @@ test(
     expected_min_chars=200,
 )
 
-# 7. List local vocational OPS
+# 7. List local OPS (perusopetus + lukio) — no filter
 test(
     "hae_paikalliset_opetussuunnitelmat — no filter",
     hae_paikalliset_opetussuunnitelmat,
     expected_min_chars=100,
 )
 
-# 8. List local vocational OPS by name
+# 8. List local OPS by municipality name
 test(
-    "hae_paikalliset_opetussuunnitelmat — nimi='Keski-Pohjanmaa'",
+    "hae_paikalliset_opetussuunnitelmat — nimi='Tampere'",
     hae_paikalliset_opetussuunnitelmat,
-    nimi="Keski-Pohjanmaa",
+    nimi="Tampere",
     expected_min_chars=100,
 )
 
-# 9. Get specific local OPS by ID (4412883 found in probes)
+# 8b. List local OPS filtered by koulutustyyppi (client-side)
 test(
-    "hae_paikallinen_opetussuunnitelma — 4412883",
-    hae_paikallinen_opetussuunnitelma,
-    4412883,
+    "hae_paikalliset_opetussuunnitelmat — koulutustyyppi_16 (perusopetus)",
+    hae_paikalliset_opetussuunnitelmat,
+    koulutustyyppi="koulutustyyppi_16",
     expected_min_chars=100,
+)
+
+# 9. Get specific local OPS by ID (24106564 = Turun lukiokoulutuksen paikallinen LOPS2021)
+test(
+    "hae_paikallinen_opetussuunnitelma — 24106564",
+    hae_paikallinen_opetussuunnitelma,
+    24106564,
+    expected_min_chars=50,
 )
 
 # 10. Search currently valid only
@@ -125,6 +134,34 @@ test(
     hae_perusteet,
     voimassa=True,
     expected_min_chars=50,
+)
+
+# 11. Perusopetus oppiaine — matematiikka vuosiluokat 7-9
+test(
+    "hae_oppiaine_tiedot — matematiikka (466344) vuosiluokat 7-9",
+    hae_oppiaine_tiedot,
+    419550,
+    466344,
+    vuosiluokat="7-9",
+    expected_min_chars=300,
+)
+
+# 12. Lukio oppiaine — biologia (lops2019, has moduulit directly)
+test(
+    "hae_oppiaine_tiedot — biologia lukio (6832790)",
+    hae_oppiaine_tiedot,
+    6828810,
+    6832790,
+    expected_min_chars=300,
+)
+
+# 13. Lukio oppiaine with oppimaarat — äidinkieli (6828950) lists sub-syllabuses
+test(
+    "hae_oppiaine_tiedot — äidinkieli lukio (6828950, oppimaarat)",
+    hae_oppiaine_tiedot,
+    6828810,
+    6828950,
+    expected_min_chars=100,
 )
 
 # ── Summary ──────────────────────────────────────────────────────────────────

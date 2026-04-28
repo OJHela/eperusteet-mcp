@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastmcp import FastMCP
+from mcp.server.fastmcp import Icon
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
@@ -10,22 +11,28 @@ Olet yhteydessä ePerusteet-palveluun — Opetushallituksen opetussuunnitelmat j
 TYÖNKULKU:
 1. hae_perusteet — KÄYTÄ ENSIN kun käyttäjä kysyy kansallisista perusteista
    → Tuloksia löytyi? → kutsu hae_peruste_tiedot ID:llä
-   → Lukion peruste (lops2019)? → kutsu hae_oppiaineet oppiainelistan saamiseksi
    → Ei tuloksia? → kokeile laajempaa hakua, poista suodattimet
 
 2. hae_peruste_tiedot — KÄYTÄ kun sinulla on peruste-ID
    → Palauttaa rakenteen: oppiaineet, tutkinnonosat, vuosiluokkakokonaisuudet
-   → Lukio? → kutsu hae_oppiaineet tarkemmalle oppiaineja moduulilistalle
+   → Lukio (lops2019): sisältää AUTOMAATTISESTI kaikki oppiaineet moduuleineen — EI erillisiä lisäkutsuja
 
-3. hae_oppiaineet — KÄYTÄ lukion oppiaineiden listaamiseen (lops2019)
-   → Palauttaa kaikki oppiaineet, moduulit ja laajuudet opintopisteinä
+3. hae_oppiaine_tiedot — KÄYTÄ yksittäisen oppiaineen SISÄLLÖN hakemiseen (tavoitteet, arviointi)
+   → Perusopetus: tavoitteet, sisältöalueet ja arviointi vuosiluokittain
+   → Lukio (lops2019): moduulit kuvauksilla ja tehtävä
+   → vuosiluokat-parametri rajaamiseen: "1-2", "3-6" tai "7-9"
+   → Workflow: hae oppiaine-ID ensin hae_peruste_tiedot-kutsulla
 
-4. hae_paikalliset_opetussuunnitelmat — KÄYTÄ ammatillisten paikallisten OPS:ien hakuun
-   → Suodata nimellä tai perusteId:llä
-   → HUOM: Vain ammatilliset OPS:t — perusopetuksen/lukion paikalliset OPS:t eivät saatavilla
+4. hae_paikalliset_opetussuunnitelmat — KÄYTÄ perusopetuksen ja lukion paikallisten OPS:ien hakuun
+   → Suodata kunnan tai koulun nimellä (esim. "Tampere", "Helsinki")
+   → Voit suodattaa koulutustyypillä: koulutustyyppi_16=perusopetus, koulutustyyppi_2=lukio
 
 5. hae_paikallinen_opetussuunnitelma — KÄYTÄ kun sinulla on paikallisen OPS:n ID
-   → Palauttaa OPS:n kuvauksen ja rakenteen
+   → Palauttaa metatiedot + suoran linkin OPS:n sisältöön ePerusteet-sivustolla
+   → HUOM: API ei palauta sisältötekstejä — linkki ohjaa käyttäjän oikeaan paikkaan
+
+6. hae_oppiaineet — KÄYTÄ vain kun tarvitaan PELKKÄ lukion oppiainelista ilman perusteen muita tietoja
+   → Normaalisti hae_peruste_tiedot riittää — tämä on erikoistapauksia varten
 
 HAKUVINKIT:
 - Käytä suomenkielisiä termejä: "perusopetus", "lukio", "matematiikka", "ammatillinen"
@@ -33,17 +40,21 @@ HAKUVINKIT:
 - Tunnettuja ID:itä: 419550=perusopetus 2014, 6828810=lukio 2019
 
 MITÄ TÄMÄ PALVELU EI VOI TEHDÄ:
-- Perusopetuksen tai lukion paikallisia OPS:ja (vain kansalliset perusteet)
+- Paikallisten OPS:ien sisältötekstejä (API:n detail-endpoint poissa käytöstä — ohjaa ePerusteet-sivustolle)
+- Ammatillisia paikallisia OPS:ja (ne ovat erillisessä AMOSAA-palvelussa)
 - Reaaliaikainen tilastodata tai koulukohtainen vertailu
 
 Datalähde: https://eperusteet.opintopolku.fi | Kieli: suomi
 """
+
+icon = Icon(src="https://www.oph.fi/themes/custom/ophfi/logo.svg")
 
 mcp = FastMCP(
     name="ePerusteet MCP",
     instructions=INSTRUCTION_STRING,
     version="1.0.0",
     website_url="https://eperusteet.opintopolku.fi",
+    icons=[icon],
 )
 
 from tools_eperusteet import (
@@ -52,16 +63,18 @@ from tools_eperusteet import (
     hae_paikalliset_opetussuunnitelmat,
     hae_paikallinen_opetussuunnitelma,
     hae_oppiaineet,
+    hae_oppiaine_tiedot,
 )
 
-# CRITICAL: requires_permission=False on every tool so Intric does not prompt user
-# fastmcp 2.3.4 uses annotations= (not meta=); ToolAnnotations has extra="allow"
+# meta={"requires_permission": False} is the Intric-specific field that disables
+# the per-tool permission prompt. This is the correct field per the Intric template.
 _no_perm = {"requires_permission": False}
-mcp.tool(annotations=_no_perm)(hae_perusteet)
-mcp.tool(annotations=_no_perm)(hae_peruste_tiedot)
-mcp.tool(annotations=_no_perm)(hae_paikalliset_opetussuunnitelmat)
-mcp.tool(annotations=_no_perm)(hae_paikallinen_opetussuunnitelma)
-mcp.tool(annotations=_no_perm)(hae_oppiaineet)
+mcp.tool(meta=_no_perm)(hae_perusteet)
+mcp.tool(meta=_no_perm)(hae_peruste_tiedot)
+mcp.tool(meta=_no_perm)(hae_paikalliset_opetussuunnitelmat)
+mcp.tool(meta=_no_perm)(hae_paikallinen_opetussuunnitelma)
+mcp.tool(meta=_no_perm)(hae_oppiaineet)
+mcp.tool(meta=_no_perm)(hae_oppiaine_tiedot)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -69,5 +82,4 @@ async def health(request: Request) -> PlainTextResponse:
     return PlainTextResponse("OK")
 
 
-# No-auth server
 app = mcp.http_app()

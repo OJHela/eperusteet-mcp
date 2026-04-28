@@ -9,12 +9,15 @@ from eperusteet_client import (
     get_peruste,
     get_lops2019_oppiaineet,
     get_lops2019_oppiaine,
-    search_amosaa_ops,
+    get_perusopetus_oppiaine,
+    search_ylops_ops,
     extract_peruste_summary,
     extract_peruste_structure,
     extract_oppiaine_summary,
+    extract_ylops_ops_summary,
     _fi,
     _ts_to_date,
+    _strip_html,
 )
 
 MAX_ROWS = 20  # hard cap per CLAUDE.md Rule 1
@@ -64,7 +67,7 @@ async def hae_perusteet(
         sivukoko=MAX_ROWS,
     )
     items = data.get("data", [])
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", len(items)))
+    total = data.get("kokonaismäärä", len(items))
 
     if not items:
         tips = []
@@ -100,8 +103,10 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
     - Käyttäjä kysyy perusteen voimassaolosta, laajuudesta tai rakenteesta
     - Jatko hae_perusteet-haun jälkeen, kun ID on saatu
 
+    HUOM: Lukion (lops2019) perusteille tämä palauttaa automaattisesti myös
+    kaikki oppiaineet moduuleineen — erillistä hae_oppiaineet-kutsua ei tarvita.
+
     THEN CALL:
-    → Lukion peruste (toteutus=lops2019)? → kutsu hae_oppiaineet saadaksesi täyden oppiainelistan
     → Paikallinen OPS? → kutsu hae_paikalliset_opetussuunnitelmat perusteId:llä
 
     DO NOT USE WHEN:
@@ -116,107 +121,119 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
       6828810  = Lukion OPS:n perusteet 2019
       1372910  = Lukion OPS:n perusteet 2015
     """
-    d = await get_peruste(peruste_id)
+    try:
+        d = await get_peruste(peruste_id)
+    except Exception:
+        return f"Perusteen {peruste_id} hakeminen epäonnistui. Tarkista ID ja yritä uudelleen."
 
-    if "syy" in d:
-        return f"Virhe: {d.get('syy', 'Tuntematon virhe')} — perusteId {peruste_id} ei löydy."
+    if not isinstance(d, dict) or "syy" in d or "virhe" in d:
+        return f"Perustetta ID:llä {peruste_id} ei löydy."
 
-    return extract_peruste_structure(d, max_chars=8000)
+    result = extract_peruste_structure(d, max_chars=8000)
+
+    # For lops2019, automatically include full oppiaineet — saves the model an extra tool call
+    is_lops2019 = bool(d.get("lops2019")) or d.get("toteutus") == "lops2019"
+    if is_lops2019:
+        oppiaineet = await get_lops2019_oppiaineet(peruste_id)
+        if oppiaineet:
+            result += f"\n\n## Oppiaineet ({len(oppiaineet)} kpl) — moduulit ja laajuudet\n"
+            for oa in oppiaineet[:MAX_ROWS]:
+                result += "\n" + extract_oppiaine_summary(oa)
+                result += "\n"
+            if len(oppiaineet) > MAX_ROWS:
+                remaining = oppiaineet[MAX_ROWS:]
+                result += f"\n[Lisää oppiaineita ({len(remaining)} kpl):]"
+                for oa in remaining:
+                    result += f"\n  - {_fi(oa.get('nimi'))} (ID: {oa.get('id')})"
+
+    return result
 
 
 async def hae_paikalliset_opetussuunnitelmat(
     nimi: str | None = None,
-    peruste_id: int | None = None,
+    koulutustyyppi: str | None = None,
     sivukoko: int = 20,
 ) -> str:
     """
-    Hae paikallisia opetussuunnitelmia (ammatilliset OPS:t koulutuksentarjoajittain).
+    Hae paikallisia opetussuunnitelmia (perusopetus, lukio) kunnittain tai kouluittain.
 
     USE THIS TOOL WHEN:
-    - Käyttäjä kysyy "Onko koulutuksentarjoaja X julkaissut paikallisen OPS:n?"
-    - Käyttäjä haluaa listata tiettyyn ammatilliseen perusteeseen pohjautuvia paikallisia OPS:ja
-    - Käyttäjä etsii organisaation nimeä tai koulutuksen nimeä paikallisista OPS:ista
-    - Käyttäjä kysyy "Mitä paikallisia ammatillisia OPS:ja on julkaistu?"
-
-    HUOM: Tämä työkalu hakee ammatillisia paikallisia OPS:ja (AMOSAA-palvelusta).
-    Perusopetuksen ja lukion paikalliset OPS:t eivät ole saatavilla tässä palvelussa
-    tällä hetkellä.
+    - Käyttäjä kysyy "Onko Tampereen kaupungilla julkaistu paikallinen OPS?"
+    - Käyttäjä haluaa listata tietyn kunnan tai koulun paikallisia OPS:ja
+    - Käyttäjä kysyy "Mitä lukion paikallisia OPS:ja on julkaistu?"
+    - Käyttäjä etsii kunnan tai koulun nimeä paikallisista OPS:ista
 
     THEN CALL:
     → Löytyi OPS? → käytä hae_paikallinen_opetussuunnitelma yksityiskohtien hakemiseen
 
     DO NOT USE WHEN:
     - Käyttäjä etsii kansallista perustetta → käytä hae_perusteet
-    - Käyttäjä etsii lukion tai perusopetuksen paikallista OPS:a
-      (niitä ei ole saatavilla tässä palvelussa)
+    - Käyttäjä etsii ammatillisia paikallisia OPS:ja (ammatilliset eivät ole tässä palvelussa)
 
     Parameters:
-    - nimi: Hakusana (koulutuksen tai organisaation nimi). Esim. "Keski-Pohjanmaa", "autoala"
-    - peruste_id: Suodatusta kansallisen perusteen ID:n mukaan (esim. 8262880)
+    - nimi: Hakusana (kunnan tai koulun nimi). Esim. "Tampere", "Helsinki", "Jyväskylä"
+    - koulutustyyppi: Suodata koulutustyypin mukaan (sovelletaan asiakaspuolella):
+        koulutustyyppi_16 = perusopetus
+        koulutustyyppi_2  = lukiokoulutus
     - sivukoko: Tulosten määrä (1–20, oletus 20)
     """
     sivukoko = min(sivukoko, MAX_ROWS)
-    data = await search_amosaa_ops(nimi=nimi, peruste_id=peruste_id, sivukoko=sivukoko)
+    # Fetch more if client-side koulutustyyppi filtering is needed
+    fetch_size = min(100, sivukoko * 5) if koulutustyyppi else sivukoko
+
+    # Finnish city names inflect in the database (e.g. Helsinki→Helsingin, Turku→Turun).
+    # If no results with the given nimi, retry dropping the last 2 chars as a stem fallback.
+    search_nimi = nimi
+    data = await search_ylops_ops(nimi=search_nimi, sivukoko=fetch_size)
+    if nimi and not data.get("data") and len(nimi) > 4:
+        search_nimi = nimi[:-2]
+        data = await search_ylops_ops(nimi=search_nimi, sivukoko=fetch_size)
+
     items = data.get("data", [])
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", len(items)))
+    total = data.get("kokonaismäärä", len(items))
+
+    # Client-side koulutustyyppi filter (server ignores this param)
+    if koulutustyyppi:
+        items = [i for i in items if i.get("koulutustyyppi") == koulutustyyppi]
 
     if not items:
         tips = []
-        if peruste_id:
-            tips.append("tarkista perusteId")
         if nimi:
-            tips.append("kokeile lyhyempää hakusanaa")
+            tips.append("kokeile lyhyempää hakusanaa tai kunnan nimeä")
+        if koulutustyyppi:
+            tips.append("kokeile ilman koulutustyyppisuodatinta")
         tip_str = " tai ".join(tips) if tips else "kokeile eri hakusanoja"
-        return (
-            f"Ei löydetty paikallisia OPS:ja. Vinkki: {tip_str}.\n"
-            "Huom: vain ammatilliset OPS:t ovat saatavilla tässä palvelussa."
-        )
+        return f"Ei löydetty paikallisia OPS:ja. Vinkki: {tip_str}."
 
-    lines = [
-        f"Löytyi {total} paikallista OPS:a (näytetään {min(len(items), MAX_ROWS)}):\n"
-    ]
-    for item in items[:MAX_ROWS]:
-        ops_nimi = _fi(item.get("nimi"))
-        ops_id = item.get("id")
-        tila = item.get("tila", "–")
-        org = item.get("koulutustoimija", {})
-        org_nimi = _fi(org.get("nimi")) if isinstance(org, dict) else "–"
-        peruste = item.get("peruste", {})
-        peruste_nimi = _fi(peruste.get("nimi")) if isinstance(peruste, dict) else "–"
-        luotu = _ts_to_date(item.get("luotu"))
-        muokattu = _ts_to_date(item.get("muokattu"))
-
-        lines.append(f"**{ops_nimi}**")
-        lines.append(f"  ID: {ops_id}")
-        lines.append(f"  Koulutustoimija: {org_nimi}")
-        lines.append(f"  Peruste: {peruste_nimi}")
-        lines.append(f"  Tila: {tila} | Luotu: {luotu} | Muokattu: {muokattu}")
-
-        # Include kuvaus excerpt if available
-        kuvaus = _fi(item.get("kuvaus", {}))
-        if kuvaus:
-            import re
-            clean = re.sub(r"<[^>]+>", " ", kuvaus)
-            clean = " ".join(clean.split())[:300]
-            if clean:
-                lines.append(f"  Kuvaus: {clean}")
+    shown = items[:sivukoko]
+    lines = [f"Löytyi paikallisia OPS:ja (näytetään {len(shown)}):\n"]
+    for item in shown:
+        lines.append(extract_ylops_ops_summary(item))
         lines.append("")
 
-    if total > MAX_ROWS:
+    if len(items) > sivukoko:
         lines.append(
-            f"[Näytetään {MAX_ROWS}/{total} — tarkenna hakua nimellä tai perusteId:llä]"
+            f"[Lisää tuloksia saatavilla — tarkenna hakua kunnan nimellä]"
+        )
+    elif not koulutustyyppi and total > fetch_size:
+        lines.append(
+            f"[Näytetään {fetch_size}/{total} — tarkenna hakua nimellä]"
         )
     return "\n".join(lines)
 
 
 async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
     """
-    Hae yksittäisen paikallisen ammatillisen OPS:n tiedot ID:n perusteella.
+    Hae yksittäisen paikallisen OPS:n tiedot ID:n perusteella (perusopetus, lukio).
 
     USE THIS TOOL WHEN:
     - Käyttäjällä on paikallisen OPS:n ID (saatu hae_paikalliset_opetussuunnitelmat-hausta)
-    - Käyttäjä haluaa tietää OPS:n sisällön, kuvauksen tai rakenteen
-    - Käyttäjä kysyy "Mitä tämä paikallinen OPS sisältää?"
+    - Käyttäjä haluaa tietää OPS:n tiedot: kunta, koulut, koulutustyyppi, julkaisuaika
+    - Käyttäjä kysyy "Mitä tietoja tästä paikallisesta OPS:sta on saatavilla?"
+
+    HUOM: OPS:n sisältötekstit eivät ole saatavilla API:n kautta tällä hetkellä
+    (yksityiskohtainen sisältö vaatisi toimivan detail-endpointin, joka on poissa käytöstä).
+    Voit ohjata käyttäjän ePerusteet-palvelun web-käyttöliittymään tarkempaa sisältöä varten.
 
     THEN CALL:
     → Tarvitaan kansallinen peruste? → kutsu hae_peruste_tiedot peruste_id:llä
@@ -228,67 +245,27 @@ async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
     Parameters:
     - ops_id: Paikallisen OPS:n numerinen ID (saatu hae_paikalliset_opetussuunnitelmat-hausta)
     """
-    # Try AMOSAA list with sivukoko=1 to get fresh data for this OPS
-    # Note: direct detail endpoint (/opetussuunnitelmat/{id}) returns 500 for AMOSAA
-    # We use the list endpoint filtered by trying to match the ID
-    # Instead, search broadly and find the matching ID from cached results
-    # Since detail endpoint is down, we do a broader search and filter
-    data = await search_amosaa_ops(sivukoko=50)
-    items = data.get("data", [])
+    # Detail endpoint returns 500 — scan the list to find the item by ID.
+    # Items appear to be ordered by ID desc; scan pages until found or exhausted.
+    sivukoko = 100
+    data = await search_ylops_ops(sivukoko=sivukoko, sivu=0)
+    total = data.get("kokonaismäärä", 0)
+    total_pages = max(1, -(-total // sivukoko))  # ceiling division
 
-    for item in items:
+    for item in data.get("data", []):
         if item.get("id") == ops_id:
-            return _format_amosaa_ops_detail(item)
+            return extract_ylops_ops_summary(item)
 
-    # Try to find by iterating pages
-    total = data.get("kokonaismäärä", data.get("kokonaism\u00e4\u00e4r\u00e4", 0))
-    if total > 50:
-        # Try a few more pages
-        for page in range(1, min(5, (total // 50) + 1)):
-            data2 = await search_amosaa_ops(sivukoko=50, sivu=page)
-            for item in data2.get("data", []):
-                if item.get("id") == ops_id:
-                    return _format_amosaa_ops_detail(item)
+    for page in range(1, total_pages):
+        data = await search_ylops_ops(sivukoko=sivukoko, sivu=page)
+        for item in data.get("data", []):
+            if item.get("id") == ops_id:
+                return extract_ylops_ops_summary(item)
 
     return (
         f"OPS:a ID:llä {ops_id} ei löydy. "
         "Varmista ID hae_paikalliset_opetussuunnitelmat-haulla."
     )
-
-
-def _format_amosaa_ops_detail(item: dict) -> str:
-    import re
-    lines = []
-    ops_nimi = _fi(item.get("nimi"))
-    lines.append(f"**{ops_nimi}**")
-    lines.append(f"ID: {item.get('id')}")
-
-    org = item.get("koulutustoimija", {})
-    if isinstance(org, dict):
-        lines.append(f"Koulutustoimija: {_fi(org.get('nimi'))}")
-
-    peruste = item.get("peruste", {})
-    if isinstance(peruste, dict):
-        lines.append(f"Pohjautuu perusteeseen: {_fi(peruste.get('nimi'))} (perusteId: {peruste.get('perusteId')})")
-        lines.append(f"Diaarinumero: {item.get('perusteDiaarinumero', '–')}")
-
-    lines.append(f"Tila: {item.get('tila', '–')}")
-    lines.append(f"Luotu: {_ts_to_date(item.get('luotu'))}")
-    lines.append(f"Muokattu: {_ts_to_date(item.get('muokattu'))}")
-
-    kielet = item.get("julkaisukielet", [])
-    if kielet:
-        lines.append(f"Julkaisukielet: {', '.join(kielet)}")
-
-    kuvaus = _fi(item.get("kuvaus", {}))
-    if kuvaus:
-        clean = re.sub(r"<[^>]+>", " ", kuvaus)
-        clean = " ".join(clean.split())
-        if len(clean) > 3000:
-            clean = clean[:3000] + "…"
-        lines.append(f"\nKuvaus:\n{clean}")
-
-    return "\n".join(lines)
 
 
 async def hae_oppiaineet(peruste_id: int) -> str:
@@ -344,3 +321,186 @@ async def hae_oppiaineet(peruste_id: int) -> str:
             lines.append(f"  - {nimi} (ID: {oa_id})")
 
     return "\n".join(lines)
+
+
+# ── Grade-level mapping ───────────────────────────────────────────────────────
+_VUOSILUOKKA_GROUPS = {
+    "1-2": {"vuosiluokka_1", "vuosiluokka_2"},
+    "3-6": {"vuosiluokka_3", "vuosiluokka_4", "vuosiluokka_5", "vuosiluokka_6"},
+    "7-9": {"vuosiluokka_7", "vuosiluokka_8", "vuosiluokka_9"},
+}
+
+
+async def hae_oppiaine_tiedot(
+    peruste_id: int,
+    oppiaine_id: int,
+    vuosiluokat: str | None = None,
+) -> str:
+    """
+    Hae yksittäisen oppiaineen täydelliset tavoitteet, sisältöalueet ja arviointi.
+
+    USE THIS TOOL WHEN:
+    - Käyttäjä kysyy "Mitä tavoitteita matematiikalle on vuosiluokille 7–9?"
+    - Käyttäjä haluaa tietää oppiaineen sisältöalueet tai arviointikriteerit
+    - Käyttäjä kysyy "Mitä äidinkielen opetuksen pitää sisältää?"
+    - Käyttäjä haluaa lukion oppiaineen moduulien kuvaukset
+
+    WORKFLOW:
+    → Hae ensin oppiaine-ID: kutsu hae_peruste_tiedot tai hae_oppiaineet
+    → Sitten kutsu tämä työkalu halutuilla parametreilla
+
+    Parameters:
+    - peruste_id: Perusteen numerinen ID (esim. 419550 = perusopetus 2014)
+    - oppiaine_id: Oppiaineen numerinen ID (saatu hae_peruste_tiedot tai hae_oppiaineet -kutsuista)
+    - vuosiluokat: Rajaa perusopetuksessa vuosiluokkaryhmään: "1-2", "3-6" tai "7-9"
+      (ei käytetä lukiossa)
+    """
+    def _clean(html: str | None) -> str:
+        return _strip_html(html) if html else ""
+
+    # ── Try perusopetus endpoint first ────────────────────────────────────────
+    try:
+        d = await get_perusopetus_oppiaine(peruste_id, oppiaine_id)
+    except Exception:
+        d = {}
+
+    vlk_list = d.get("vuosiluokkakokonaisuudet", [])
+
+    if vlk_list:
+        # Perusopetus oppiaine
+        nimi = _fi(d.get("nimi"))
+        lines = [f"**{nimi}** — tavoitteet ja sisältö (perusopetus, peruste {peruste_id})\n"]
+
+        # Filter by requested grade group
+        if vuosiluokat and vuosiluokat in _VUOSILUOKKA_GROUPS:
+            wanted = _VUOSILUOKKA_GROUPS[vuosiluokat]
+            vlk_list = [
+                v for v in vlk_list
+                if set(v.get("vuosiluokat", [])) & wanted
+            ]
+
+        for vlk in vlk_list:
+            luokat = vlk.get("vuosiluokat", [])
+            luokat_str = ", ".join(sorted(l.replace("vuosiluokka_", "") for l in luokat))
+            lines.append(f"## Vuosiluokat {luokat_str}\n")
+
+            # Tavoitteet
+            tavoitteet = vlk.get("tavoitteet", [])
+            if tavoitteet:
+                lines.append(f"### Tavoitteet ({len(tavoitteet)} kpl)")
+                for t in tavoitteet:
+                    tavoite = _clean(_fi(t.get("tavoite")))
+                    if tavoite:
+                        lines.append(f"- {tavoite}")
+                lines.append("")
+
+            # Sisältöalueet
+            sisaltoalueet = vlk.get("sisaltoalueet", [])
+            if sisaltoalueet:
+                lines.append(f"### Sisältöalueet ({len(sisaltoalueet)} kpl)")
+                for s in sisaltoalueet:
+                    s_nimi = _clean(_fi(s.get("nimi")))
+                    s_kuvaus = _clean(_fi(s.get("kuvaus")))
+                    if s_nimi:
+                        lines.append(f"**{s_nimi}**")
+                    if s_kuvaus:
+                        lines.append(f"{s_kuvaus[:400]}")
+                lines.append("")
+
+            # Arviointi
+            arviointi = vlk.get("arviointi", {})
+            if arviointi:
+                arv_teksti = _clean(_fi(arviointi.get("arvioinninKuvaus") or arviointi.get("kuvaus")))
+                if arv_teksti:
+                    lines.append("### Arviointi")
+                    lines.append(arv_teksti[:600])
+                    lines.append("")
+
+        shown_groups = [
+            ", ".join(sorted(l.replace("vuosiluokka_", "") for l in v.get("vuosiluokat", [])))
+            for v in vlk_list
+        ]
+        result = "\n".join(lines)
+        if len(result) > 10000:
+            groups_str = " ja ".join(shown_groups) if shown_groups else "kaikki"
+            result = result[:10000] + f"\n\n[Sisältöä katkaistu (näytetty vuosiluokat: {groups_str}) — käytä vuosiluokat-parametria ('1-2', '3-6' tai '7-9') rajaukseen]"
+
+        # If no actual content was found, this is likely a parent subject whose content
+        # lives in oppimäärät (e.g. Äidinkieli ja kirjallisuus → Suomen kieli ja kirjallisuus).
+        all_vlk = d.get("vuosiluokkakokonaisuudet") or []
+        has_content = any(v.get("tavoitteet") or v.get("sisaltoalueet") for v in all_vlk)
+        if not has_content:
+            oppimaarat = d.get("oppimaarat", [])
+            if oppimaarat:
+                result += (
+                    "\n\nTämä oppiaine jakautuu oppimääriin — varsinainen sisältö on "
+                    "oppimääräkohtaisissa tiedoissa. Kutsu hae_oppiaine_tiedot "
+                    "alla olevalla oppimäärä-ID:llä:\n"
+                )
+                for om in oppimaarat:
+                    result += f"  - {_fi(om.get('nimi'))} (ID: {om.get('id')})\n"
+
+        return result
+
+    # ── Try lukio lops2019 endpoint ───────────────────────────────────────────
+    try:
+        d = await get_lops2019_oppiaine(peruste_id, oppiaine_id)
+    except Exception:
+        return (
+            f"Oppiainetta ID {oppiaine_id} ei löydy perusteesta {peruste_id}. "
+            "Tarkista ID hae_peruste_tiedot- tai hae_oppiaineet-kutsulla."
+        )
+
+    nimi = _fi(d.get("nimi"))
+    lines = [f"**{nimi}** — moduulit ja tavoitteet (lukio lops2019, peruste {peruste_id})\n"]
+
+    tehtava = _clean(_fi(d.get("tehtava")))
+    if tehtava:
+        lines.append(f"### Oppiaineen tehtävä\n{tehtava[:600]}\n")
+
+    tavoitteet = d.get("tavoitteet")
+    if tavoitteet:
+        if isinstance(tavoitteet, dict):
+            # Try as multilingual object, then as {kuvaus: {...}}
+            tav_teksti = _clean(_fi(tavoitteet) or _fi(tavoitteet.get("kuvaus")))
+        elif isinstance(tavoitteet, list):
+            tav_teksti = " ".join(
+                _clean(_fi(t.get("tavoite", t)) if isinstance(t, dict) else str(t))
+                for t in tavoitteet[:20]
+            )
+        else:
+            tav_teksti = ""
+        if tav_teksti:
+            lines.append(f"### Tavoitteet\n{tav_teksti[:600]}\n")
+
+    moduulit = d.get("moduulit") or []
+    oppimaarat = d.get("oppimaarat") or []
+
+    if moduulit:
+        lines.append(f"### Moduulit ({len(moduulit)} kpl)\n")
+        for m in moduulit:
+            m_nimi = _fi(m.get("nimi"))
+            koodi = m.get("koodi", {}).get("arvo", "") if isinstance(m.get("koodi"), dict) else ""
+            pak = "[pakollinen]" if m.get("pakollinen") else "[valinnainen]"
+            laajuus = m.get("laajuus")
+            la_str = f" {laajuus} op" if laajuus else ""
+            lines.append(f"**{m_nimi}** ({koodi}){la_str} {pak}")
+            kuvaus = _clean(_fi(m.get("kuvaus")))
+            if kuvaus:
+                lines.append(f"{kuvaus[:400]}")
+            lines.append("")
+    elif oppimaarat:
+        # This oppiaine has sub-syllabuses (oppimäärät) — list them with IDs
+        # so the caller can drill into a specific oppimäärä
+        lines.append(f"### Oppimäärät ({len(oppimaarat)} kpl)\n")
+        lines.append("Tämä oppiaine jakautuu oppimääriin. Hae tarkemmat tiedot kutsumalla")
+        lines.append("hae_oppiaine_tiedot uudelleen alla olevalla oppimäärä-ID:llä:\n")
+        for om in oppimaarat:
+            om_nimi = _fi(om.get("nimi"))
+            om_id = om.get("id")
+            lines.append(f"  - {om_nimi} (ID: {om_id})")
+
+    result = "\n".join(lines)
+    if len(result) > 10000:
+        result = result[:10000] + "\n\n[Sisältöä katkaistu]"
+    return result
