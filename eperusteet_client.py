@@ -9,6 +9,7 @@ Three backend services:
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import re
 import time
 from typing import Any
@@ -91,8 +92,8 @@ def _ts_to_date(ms: int | None) -> str | None:
 
 
 def _strip_html(text: str) -> str:
-    """Strip HTML tags and collapse whitespace."""
-    return " ".join(re.sub(r"<[^>]+>", " ", text).split())
+    """Strip HTML tags, decode HTML entities, and collapse whitespace."""
+    return " ".join(_html.unescape(re.sub(r"<[^>]+>", " ", text)).split())
 
 
 # ── National frameworks (perusteet) ──────────────────────────────────────────
@@ -175,8 +176,9 @@ def _ylops_koulut(organisaatiot: list) -> list[str]:
 def extract_ylops_ops_summary(item: dict) -> str:
     lines = []
     nimi = _fi(item.get("nimi", {}))
+    ops_id = item.get("id")
     lines.append(f"**{nimi}**")
-    lines.append(f"  ID: {item.get('id')}")
+    lines.append(f"  ID: {ops_id}")
     lines.append(f"  Koulutustyyppi: {item.get('koulutustyyppi', '–')}")
     orgs = item.get("organisaatiot") or []
     kunta = _ylops_kunta(orgs)
@@ -191,6 +193,8 @@ def extract_ylops_ops_summary(item: dict) -> str:
     julkaistu = _ts_to_date(item.get("julkaisuaika"))
     if julkaistu:
         lines.append(f"  Julkaistu: {julkaistu}")
+    if ops_id:
+        lines.append(f"  Sisältö verkossa: https://eperusteet.opintopolku.fi/eperusteet-app/#/fi/ops/{ops_id}/tiedot")
     return "\n".join(lines)
 
 
@@ -308,7 +312,7 @@ def extract_peruste_structure(d: dict, max_chars: int = 8000) -> str:
     return result
 
 
-def extract_oppiaine_summary(oa: dict, include_modules: bool = True) -> str:
+def extract_oppiaine_summary(oa: dict) -> str:
     """Extract a readable summary from a lops2019 oppiaine dict."""
     lines = []
     nimi = _fi(oa.get("nimi"))

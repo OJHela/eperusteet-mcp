@@ -121,10 +121,13 @@ async def hae_peruste_tiedot(peruste_id: int) -> str:
       6828810  = Lukion OPS:n perusteet 2019
       1372910  = Lukion OPS:n perusteet 2015
     """
-    d = await get_peruste(peruste_id)
+    try:
+        d = await get_peruste(peruste_id)
+    except Exception:
+        return f"Perusteen {peruste_id} hakeminen epäonnistui. Tarkista ID ja yritä uudelleen."
 
-    if "syy" in d:
-        return f"Virhe: {d.get('syy', 'Tuntematon virhe')} — perusteId {peruste_id} ei löydy."
+    if not isinstance(d, dict) or "syy" in d or "virhe" in d:
+        return f"Perustetta ID:llä {peruste_id} ei löydy."
 
     result = extract_peruste_structure(d, max_chars=8000)
 
@@ -187,7 +190,7 @@ async def hae_paikalliset_opetussuunnitelmat(
         data = await search_ylops_ops(nimi=search_nimi, sivukoko=fetch_size)
 
     items = data.get("data", [])
-    total = data.get("kokonaism\u00e4\u00e4r\u00e4", len(items))
+    total = data.get("kokonaismäärä", len(items))
 
     # Client-side koulutustyyppi filter (server ignores this param)
     if koulutustyyppi:
@@ -246,14 +249,14 @@ async def hae_paikallinen_opetussuunnitelma(ops_id: int) -> str:
     # Items appear to be ordered by ID desc; scan pages until found or exhausted.
     sivukoko = 100
     data = await search_ylops_ops(sivukoko=sivukoko, sivu=0)
-    total = data.get("kokonaism\u00e4\u00e4r\u00e4", 0)
+    total = data.get("kokonaismäärä", 0)
     total_pages = max(1, -(-total // sivukoko))  # ceiling division
 
     for item in data.get("data", []):
         if item.get("id") == ops_id:
             return extract_ylops_ops_summary(item)
 
-    for page in range(1, min(total_pages, 13)):
+    for page in range(1, total_pages):
         data = await search_ylops_ops(sivukoko=sivukoko, sivu=page)
         for item in data.get("data", []):
             if item.get("id") == ops_id:
@@ -413,9 +416,14 @@ async def hae_oppiaine_tiedot(
                     lines.append(arv_teksti[:600])
                     lines.append("")
 
+        shown_groups = [
+            ", ".join(sorted(l.replace("vuosiluokka_", "") for l in v.get("vuosiluokat", [])))
+            for v in vlk_list
+        ]
         result = "\n".join(lines)
         if len(result) > 10000:
-            result = result[:10000] + "\n\n[Sisältöä katkaistu — rajaa vuosiluokat-parametrilla]"
+            groups_str = " ja ".join(shown_groups) if shown_groups else "kaikki"
+            result = result[:10000] + f"\n\n[Sisältöä katkaistu (näytetty vuosiluokat: {groups_str}) — käytä vuosiluokat-parametria ('1-2', '3-6' tai '7-9') rajaukseen]"
 
         # If no actual content was found, this is likely a parent subject whose content
         # lives in oppimäärät (e.g. Äidinkieli ja kirjallisuus → Suomen kieli ja kirjallisuus).
@@ -450,9 +458,18 @@ async def hae_oppiaine_tiedot(
     if tehtava:
         lines.append(f"### Oppiaineen tehtävä\n{tehtava[:600]}\n")
 
-    tavoitteet = d.get("tavoitteet", {})
-    if isinstance(tavoitteet, dict):
-        tav_teksti = _clean(_fi(tavoitteet))
+    tavoitteet = d.get("tavoitteet")
+    if tavoitteet:
+        if isinstance(tavoitteet, dict):
+            # Try as multilingual object, then as {kuvaus: {...}}
+            tav_teksti = _clean(_fi(tavoitteet) or _fi(tavoitteet.get("kuvaus")))
+        elif isinstance(tavoitteet, list):
+            tav_teksti = " ".join(
+                _clean(_fi(t.get("tavoite", t)) if isinstance(t, dict) else str(t))
+                for t in tavoitteet[:20]
+            )
+        else:
+            tav_teksti = ""
         if tav_teksti:
             lines.append(f"### Tavoitteet\n{tav_teksti[:600]}\n")
 
